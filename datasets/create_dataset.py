@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 #import tensorflow as tf
 import sys
 import os
-os.chdir("/Users/moskowitzi/Desktop/Senior_Year_at_Yale/git_repos/ASTR-375-Final-Project/")
-sys.path.append("/Users/moskowitzi/Desktop/Senior_Year_at_Yale/git_repos/ASTR-375-Final-Project/MoonPy")
+#os.chdir("/Users/moskowitzi/Desktop/Senior_Year_at_Yale/git_repos/ASTR-375-Final-Project/")
+#sys.path.append("/Users/moskowitzi/Desktop/Senior_Year_at_Yale/git_repos/ASTR-375-Final-Project/MoonPy")
 #from moonpy import *
 #from moonpy import LightCurve
 import batman
@@ -31,25 +31,25 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm.contrib.concurrent import process_map
 
 from pandoramoon import pandora, model_params, moon_model, time
-
-#from moonpy import transitmodel as tm 
+import click
 
 
 def mean_anomaly(P, e, omega_deg, b=0, a_over_R=None):
     omega = np.radians(omega_deg)
 
     if b == 0 or a_over_R is None:
-        f = np.pi / 2 - omega
+        f = np.pi/2 - omega
     else:
-        cos_f = -e + (1 + e * np.cos(omega)) * b / a_over_R
+        cos_f = -e + (1 + e*np.cos(omega)) * b / a_over_R
+        # clamp into [-1, 1]
+        cos_f = np.clip(cos_f, -1.0, 1.0)
         f = np.arccos(cos_f)
-    #f_transit = np.pi / 2 - omega
-    E = 2 * np.arctan(np.tan(f / 2) * np.sqrt((1 - e) / (1 + e)))
+
+    E = 2 * np.arctan(np.tan(f/2) * np.sqrt((1-e)/(1+e)))
     if E < 0:
-        E += 2 * np.pi
-    M = E - e * np.sin(E)
-    delta_t = (P / (2 * np.pi)) * M
-    return delta_t
+        E += 2*np.pi
+    M = E - e*np.sin(E)
+    return (P / (2*np.pi)) * M
 
 def kepler_3rd_law(mass_planet, mass_moon, a):
     G = 6.67*10**(-11) # in SI units
@@ -60,12 +60,16 @@ def mass_radius_polytrope(R): # assuming a polytropic equation of state for the 
     M = R**1/0.27 # this is a proportion, so the radius is described in Jupiter radii
     return M
 
-def terrestrial_radius(mass): # make sure masses and radii are normalized to a reference point!
-    return mass**(0.28)
+def terrestrial_radius(mass, solar_radius): # make sure masses and radii are normalized to a reference point!
+    M_e = 5.9722*10**24
+    R_e = 6.3781*10**6
+    return (mass/M_e)**(0.28) * R_e/solar_radius
+def gas_giant_radius(mass):
+    R_jup = 7.1492e7
+    M_j = 1.898 * 10**27
+    return (mass/M_j)**(-0.06)
 
 def make_time_array(t0, P, N_epochs, B, cad_per_day):
-    """Return a (small!) array that covers N_epochs windows of
-       length (2B + T_d), each centered on t0 + n⋅P."""
     dt = 1.0 / cad_per_day
     all_times = []
     for n in range(N_epochs):
@@ -73,107 +77,103 @@ def make_time_array(t0, P, N_epochs, B, cad_per_day):
         window = np.arange(center - B, center + B, dt)
         all_times.append(window)
     return np.concatenate(all_times)
+    
+    # make a list of (planet_mass, moon_mass, a_meters)
+
+def transit_duration(P, aR, k, b, e=0.0, omega_deg=90.0):
+    omega = np.radians(omega_deg)
+    arg = ((1 + k)**2 - b**2) / (aR**2 - b**2)
+    arg = np.clip(arg, 0,1)
+    factor = np.sqrt(1 - e*e)/(1 + e*np.sin(omega))
+    return (P/np.pi) * np.arcsin(np.sqrt(arg)) * factor
+
 
 def simulate_plm(args):
-    solar_mass = 1.989 * 10**30 # kg
-    solar_radius = 6.95700*10**8 # m
-    planet_mass, moon_mass, a_meters = args
-    #for a_meters in tqdm(planet_a_ranges):
-    #a_meters = np.random.choice(planet_a_ranges, size=1)[0]
-    #print(a_meters)
+    planet_mass, moon_mass, a_m, out_dir = args
     params = model_params()
-    params.R_star = solar_radius  # [m]
-    params.u1 = 0.4089
-    params.u2 = 0.2556
-    a_pl = a_meters / params.R_star
-    eccentricity = np.random.rand()
-    params.ecc_bary = eccentricity 
-    params.a_bary = a_pl
-    params.b_bary = np.random.rand()
-    planet_radius = terrestrial_radius(planet_mass/solar_mass) # in stellar units
-    params.r_planet = planet_radius
-    period = kepler_3rd_law(solar_mass, planet_mass, a_meters)
-    params.per_bary = period * 1/3600 * 1/24
-    params.w_bary = 20
-    params.t0_bary = mean_anomaly(period, eccentricity, params.w_bary, b=params.b_bary, a_over_R=a_pl)
-    params.t0_bary_offset = 0
+    params.M_star = np.random.uniform(0.079, 2.0) * 1.989e30    # 0.08–2 M☉
+    params.R_star = (params.M_star / 1.0e30)**0.8 * 6.957e8     # R ∝ M^0.8 [m]
+    params.u1, params.u2 = 0.4089, 0.2556                      # limb darkening
+
     params.M_planet = planet_mass
+    params.per_bary = kepler_3rd_law(params.M_star, planet_mass, a_m)  # days
+    params.a_bary = a_m / params.R_star                          # in R_star
+    if "terrestrial" in out_dir:
+        params.r_planet = (planet_mass / 1.0e24)**0.28
+    else:
+        params.r_planet = gas_giant_radius(planet_mass)
+    params.ecc_bary = np.random.uniform(0.0, 0.5)      
+    params.b_bary   = np.random.uniform(0.0, 1.0 + params.r_planet)
+    params.w_bary   = np.random.uniform(0, 360)                  
+    params.t0_bary  = np.random.uniform(0, params.per_bary)    
+    params.t0_bary_offset = 0
 
+    hill_r = params.a_bary * (planet_mass / (3*params.M_star))**(1/3)
+    moon_a = np.random.uniform(0.05*hill_r, 0.5*hill_r) * params.R_star
+    params.M_moon   = moon_mass
+    params.per_moon = kepler_3rd_law(planet_mass, moon_mass, moon_a) # days
+    params.a_moon   = moon_a / params.R_star                     # in R_star
+    params.r_moon   = (moon_mass / 1.0e24)**0.28                 # Rough scaling for terrestrial objects
+    params.ecc_moon = np.random.uniform(0.0, 0.3)
+    params.i_moon   = np.random.uniform(80, 90)
+    params.Omega_moon = np.random.uniform(0, 360)
+    params.w_moon     = np.random.uniform(0, 360)
+    params.tau_moon   = np.random.uniform(0, params.per_moon)
 
-    # Moon parameters
-    moon_radius = terrestrial_radius(moon_mass/solar_mass) # assuming rocky moons that have a similar empirical relation as rocky planets
-    hill_radius = params.a_bary * (params.M_planet/(3*(solar_mass+params.M_planet)))**(1/3)
-    params.r_moon = moon_radius
-    moon_a = np.random.uniform(0.01*hill_radius, 0.5*hill_radius)
-    params.per_moon = kepler_3rd_law(planet_mass, moon_mass, moon_a) * 1/3600 * 1/24
-    params.Omega_moon = 0
-    params.tau_moon = mean_anomaly(params.per_moon, 0.001, params.Omega_moon)
-    params.w_moon = 20
-    params.e_moon = 0.001
-    params.i_moon = np.random.uniform(80, 90)
-    params.M_moon = moon_mass
+    params.epochs             = 1
+    params.epoch_distance     = params.per_bary
+    params.epoch_duration     = 2.5 * (params.r_planet + 0.1) # extended the epoch range to cover the moon's transit as well
+    params.cadences_per_day   = 250
+    params.supersampling_factor = 1
+    params.occult_small_threshold = 0.0
+    params.hill_sphere_threshold  = 1.2
 
-    #params.epoch_duration = 0.6  # [days]
-    params.epochs = 1
-
-    B = 0.5
-    t_start = params.t0_bary - B
-    t_end   = params.t0_bary + B
-    
-    k = params.r_planet
-    arg = (1 + k)**2 - params.b_bary**2
-    
-    duration = (params.per_bary/np.pi
-           * np.arcsin((1/params.a_bary) * np.sqrt(arg))
-           * np.sqrt(1 - params.ecc_bary**2)
-           / (1 + params.ecc_bary*np.sin(np.radians(params.w_bary))))
-
-    params.epoch_distance = params.per_bary
-    params.epoch_duration = duration
-    params.cadences_per_day = 250
-    cadence = 1/params.cadences_per_day  # days per sample
-    time_array = np.arange(t_start, t_end, cadence)
-    """params.epoch_duration = T_d + 2*B
-    #params.epoch_duration = duration
-    #print(transit_time)
-    #params.epoch_duration = transit_time
-    params.cadences_per_day = 250  # [int]
-    params.epoch_distance = params.per_bary   # [days]
-    params.supersampling_factor = 1  # [int]
-    params.occult_small_threshold = 0.1  # [0..1]
-    params.hill_sphere_threshold = 1.2"""
-
-
-    #time_array = time(params).grid()
-    
+    t_grid = time(params).grid()                         # days
     model = moon_model(params)
-    flux_total, flux_planet, flux_moon = model.light_curve(time_array)
-    #print("flux_total", flux_total)
-    #print("flux_planet", flux_planet)
-    #print("flux_moon", flux_moon)
+    flux_total, flux_planet, flux_moon = model.light_curve(t_grid)
 
-    xp, yp, xm, ym = model.coordinates(time_array)
-    noise_level = 100e-6 # Gaussian noise -- would this reflect the noise-profile of TESS?
-    noise = np.random.normal(0, noise_level, len(time_array))
-    test_data = noise + flux_total
-    #tensor_input = np.expand_dims(tensor_input, axis=-1)
-    yerr = np.full(len(test_data), noise_level)
+    noise_level = 50e-6                                              # 50 ppm
+    flux_obs = flux_total + np.random.normal(0, noise_level, size=t_grid.shape)
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir,
+        f"planet{planet_mass}_moon{moon_mass}_a{a_m}.csv"
+    )
+    yerr = np.full(len(flux_obs), noise_level)
     data = {
-        'time':time_array,
+        'time':t_grid,
         'flux_planet': flux_planet,
-        'flux_moom': flux_moon,
+        'flux_moon': flux_moon,
         'flux_total': flux_total,
         't0_planet': params.t0_bary,
         't0_moon': params.tau_moon,
-        'lc_data': test_data,
+        'lc_data': flux_obs,
         'yerr': yerr
     }
     df = pd.DataFrame(data)
-    out_dir = "terrestrial_lightcurves/"
-    os.makedirs(out_dir, exist_ok=True)
-    df.to_csv(f"{out_dir}a_{a_meters}_planet_mass_{planet_mass}_moon_mass_{moon_mass}.csv")
+    #out_dir = "terrestrial_lightcurves/"
+    df.to_csv(out_path)
 
-def main():
+
+
+@click.command()
+@click.option(
+    "--terrestrial/--no-terrestrial",
+    default=False,
+    help="Simulate terrestrial planet-moon systems"
+)
+@click.option(
+    "--neptunian/--no-neptunian",
+    default=False,
+    help="Simulate neptunian planet-moon systems"
+)
+@click.option(
+    "--jovian/--no-jovian",
+    default=False,
+    help="Simulate jovian planet-moon systems"
+)
+@click.option("--only_planet/--no-only_planet", default = False, help="Simulate only planetary systems (no moons)")
+def main(terrestrial, neptunian, jovian, only_planet):
     solar_mass = 1.989 * 10**30 # kg
     solar_radius = 6.95700*10**8 # m
     
@@ -186,7 +186,7 @@ def main():
     jupiter_mass = 1.898 * 10**27 # kg
     jupiter_radius = 7.1492*10**7 # m
     neptune_mass = 1.024 * 10**26 # kg
-    neptune_radius = 2.4764 *10**3 # m
+    neptune_radius = 2.4764 *10**7 # m
     earth_mass = 5.9722*10**24 #kg
     earth_radius = 6.3781*10**6 # m
     super_earth_mass = 10*earth_mass # guides for super_earth parameters, numbers vary
@@ -199,7 +199,7 @@ def main():
     # Moon characteristics
     min_moon_mass = 4.79984 * 10**22 # Europa, kg
     max_moon_mass = earth_mass
-    min_moon_radius = 1.5608 * 10**3 # m Europa
+    min_moon_radius = 1.5608 * 10**6 # m Europa
     max_moon_radius = earth_radius
     
     moon_mass_ranges = 10**(np.random.uniform(np.log10(min_moon_mass), np.log10(max_moon_mass), size=200))
@@ -219,28 +219,55 @@ def main():
     solar_radii = 10**(np.random.uniform(np.log10(min_star_radius), np.log10(max_star_radius), size = 200))
 
     
-    planet_list = terrestrial_mass_ranges
+    terrestrial_planet_list = terrestrial_mass_ranges
+    neptunian_planet_list = neptunian_mass_ranges
+    jovian_planet_list = jovian_mass_ranges
     moon_list   = moon_mass_ranges
     a_choices   = planet_a_ranges
+
+    if terrestrial:
+        planet_list = terrestrial_mass_ranges
+        out_dir = "datasets/terrestrial_lightcurves"
+        if only_planet:
+            moon_list = np.zeros_like(planet_list)
+            out_dir = f"{out_dir}_no_moon"
+    elif neptunian:
+        planet_list = neptunian_mass_ranges
+        out_dir = "datasets/neptunian_lightcurves"
+        if only_planet:
+            moon_list = np.zeros_like(planet_list)
+            out_dir = f"{out_dir}_no_moon"
+    else:
+        planet_list = jovian_mass_ranges
+        out_dir = "datasets/jovian_lightcurves"
+        if only_planet:
+            moon_list = np.zeros_like(planet_list)
+            out_dir = f"{out_dir}_no_moon"
+
+    os.makedirs(out_dir, exist_ok=True)
     
     # make a list of (planet_mass, moon_mass, a_meters)
-    tasks = [
-        (pm, mm, np.random.choice(a_choices))
-        for pm, mm in product(planet_list, moon_list)
-    ]
+    tasks = [(pm, mm, np.random.choice(a_choices), out_dir) for pm, mm in product(planet_list, moon_list)]
+
+    #for t in tasks[:5]:
+        #simulate_plm(t)
+    #print("✅ 5 example light‐curves generated successfully")
     
-    """n_workers = os.cpu_count() or 4
+    n_workers = os.cpu_count() or 4
     
-    with ProcessPoolExecutor(max_workers=n_workers) as exe:
-        futures = [exe.submit(simulate_plm, t) for t in tasks]
-        for fut in tqdm(as_completed(futures), total=len(futures)):
-            _ = fut.result()    # raises if there was an exception"""
-    results = process_map(simulate_plm,tasks,max_workers=os.cpu_count(),desc="Simulating LC",unit="lc")
+    #with ProcessPoolExecutor(max_workers=n_workers) as exe:
+        #futures = [exe.submit(simulate_plm, t) for t in tasks]
+        #for fut in tqdm(as_completed(futures), total=len(futures)):
+            #_ = fut.result()    # raises if there was an exception
+    results = process_map(simulate_plm,tasks,max_workers=os.cpu_count(),chunksize=100,desc="Simulating LC",unit="lc")
     
     print("Done!")
 
 if __name__ == "__main__":
     main()
+    #results = process_map(simulate_plm,tasks,max_workers=os.cpu_count(),desc="Simulating LC",unit="lc")
+    
+    print("Done!")
 
 
 
