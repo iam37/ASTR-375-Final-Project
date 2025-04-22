@@ -120,9 +120,15 @@ def simulate_plm(args):
     params.w_moon     = np.random.uniform(0, 360)
     params.tau_moon   = np.random.uniform(0, params.per_moon)
 
+    duration = (params.per_bary/np.pi
+           * np.arcsin((1/params.a_bary) * np.sqrt(arg))
+           * np.sqrt(1 - params.ecc_bary**2)
+           / (1 + params.ecc_bary*np.sin(np.radians(params.w_bary))))
+
+
     params.epochs             = 1
     params.epoch_distance     = params.per_bary
-    params.epoch_duration     = 2.5 * (params.r_planet + 0.1) # extended the epoch range to cover the moon's transit as well
+    params.epoch_duration     = 2.5 * (duration + 0.1) # extended the epoch range to cover the moon's transit as well
     params.cadences_per_day   = 250
     params.supersampling_factor = 1
     params.occult_small_threshold = 0.0
