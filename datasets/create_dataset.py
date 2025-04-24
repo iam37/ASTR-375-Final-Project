@@ -31,6 +31,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm.contrib.concurrent import process_map
 
 from pandoramoon import pandora, model_params, moon_model, time
+#from pandoramoon.lightcurve import transit_duration
 import click
 
 
@@ -99,11 +100,11 @@ def mass_radius_polytrope(R): # assuming a polytropic equation of state for the 
 def terrestrial_radius(mass, solar_radius): # make sure masses and radii are normalized to a reference point!
     M_e = 5.9722*10**24
     R_e = 6.3781*10**6
-    return (mass/M_e)**(0.28) * solar_radius
+    return (mass)**(0.28) * solar_radius
 def gas_giant_radius(mass, solar_radius):
     R_jup = 7.1492e7
     M_j = 1.898 * 10**27
-    return (mass/M_j)**(-0.06) * solar_radius
+    return (mass)**(-0.06) * solar_radius
 
 def make_time_array(t0, P, N_epochs, B, cad_per_day):
     dt = 1.0 / cad_per_day
@@ -141,6 +142,7 @@ def simulate_plm(args):
     a_pl = a_meters / params.R_star
     eccentricity = np.random.rand()*0.5
     params.ecc_bary = eccentricity 
+    #print(a_pl)
     params.a_bary = a_pl
     params.i_moon = np.random.uniform(80, 90)
 
@@ -149,8 +151,8 @@ def simulate_plm(args):
     else:
         planet_radius = gas_giant_radius(planet_mass/solar_mass, solar_radius) # in stellar units
     params.r_planet = planet_radius
-    k = params.r_planet
-    params.b_bary = np.random.uniform(0, 1 + k)
+    #k = params.r_planet
+    params.b_bary = 0.3
     period = kepler_3rd_law(solar_mass, planet_mass, a_meters)
     params.per_bary = period * 1/3600 * 1/24
     params.w_bary = 20
@@ -176,20 +178,21 @@ def simulate_plm(args):
     params.w_moon = 20.0
     
     #params.tau_moon = mean_anomaly(params.per_moon, e=params.ecc_moon, omega_deg=params.w_moon, b=params.b_bary, a_over_R=a_moon_by_Rstar)
-    params.tau_moon = time_of_periapse(params.t0_bary, params.ecc_moon, np.pi/2 - np.radians(params.w_bary), params.per_moon)
+    params.tau_moon = time_of_periapse(params.t0_bary, params.ecc_moon, np.pi/2 - np.radians(params.w_moon), params.per_moon)
     #params.tau_moon = params.per_moon/4
     params.M_moon = moon_mass
 
     params.epochs = 1
+    
+    k=params.r_planet
 
     #B =   # days of baseline
     arg = (1 + k)**2 - params.b_bary**2
-    arg = np.clip(arg, 0, None)
-    duration = (params.per_bary/np.pi
-           * np.arcsin((1/params.a_bary) * np.sqrt(arg))
-           * np.sqrt(1 - params.ecc_bary**2)
-           / (1 + params.ecc_bary*np.sin(np.radians(params.w_bary))))
-    #T_moon = transit_duration(params.per_moon, a_moon_by_Rstar, params.r_moon, params.b_moon, params.ecc_moon, params.w_moon)
+    #print(arg)
+    #arg = np.clip(arg, 0, None)
+    duration = transit_duration(params.per_bary, params.a_bary, params.r_planet, params.b_bary, params.ecc_bary, params.w_bary)
+    #T14 = transit_duration(params)
+    #T14 = transit_duration(params.per_bary, a_pl, params.r_planet, params.b_bary, params.ecc_bary, params.w_bary)
 
     # how far (in time) the moon can lead/lag the planet
     t0 = params.t0_bary
@@ -197,18 +200,20 @@ def simulate_plm(args):
     #dt = 1.0 / params.cadences_per_day
     
     #B = max(0.5, abs(params.tau_moon) + T_moon/2)
-    B = 0.6
+    B = 1
+    lead_lag = abs(params.tau_moon - params.t0_bary)
 
     t_start = params.t0_bary - B
     params.epoch_distance = params.per_bary
-    params.epoch_duration = duration
+    params.epoch_duration = 2*duration
+    params.t0_bary_offset = -params.t0_bary
     params.cadences_per_day = 250
     params.supersampling_factor = 1.0
     params.occult_small_threshold = 1e-8
     params.hill_sphere_threshold  = 1.2
     t_end  = params.t0_bary + B
     cadence = 1/params.cadences_per_day  # days per sample
-    time_array = np.arange(t_start, t_end, cadence)
+    time_array = time(params).grid()
     
     model = moon_model(params)
     flux_total, flux_planet, flux_moon = model.light_curve(time_array)
@@ -357,8 +362,3 @@ if __name__ == "__main__":
     #results = process_map(simulate_plm,tasks,max_workers=os.cpu_count(),desc="Simulating LC",unit="lc")
     
     print("Done!")
-
-
-
-    
-
